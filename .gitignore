@@ -11,6 +11,7 @@ test_pos
 *.a
 *.so
 *.d
+*.db
 
 # macOS
 .DS_Store
