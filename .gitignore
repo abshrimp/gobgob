@@ -1,0 +1,24 @@
+# 実行ファイル
+analyze
+query
+test_pos
+
+# オブジェクトファイル
+*.o
+
+# デバッグ・一時ファイル
+*.out
+*.a
+*.so
+*.d
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/
+
+# clang / gcc系の一時
+*.dSYM/
+
+.claude/
