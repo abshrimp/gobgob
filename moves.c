@@ -2,32 +2,44 @@
 #include <string.h>
 
 /*
- * Forward move generation.
+ * Forward move generation (bitboard).
  *
- * Returns the number of *legal* moves for the current player.  A move is
- * "legal" iff it can be made without immediately handing the game to the
- * opponent — concretely, picking up a piece on the board must not expose
- * either player's three-in-a-row (we exclude such pickup-triggers because
- * they are end-of-game branches that don't lead to a normal next turn).
+ * Returns the number of legal moves; out-parameter `winning_count` is
+ * set to the number of placements/movements that complete a CP three.
  *
- * Both winning placements (which complete CP's row) and ordinary moves are
- * included; their count is returned via *winning_count.
+ * A move is excluded if executing the pickup phase exposes EITHER
+ * player's three-in-a-row.  This keeps the move set perfectly symmetric
+ * with `generate_predecessors`.
  */
 int generate_moves(const board_t *b, move_t *moves, int *winning_count)
 {
     int n = 0, wc = 0;
 
-    /* (1) place from hand */
+    uint16_t top_cp, top_op, mn_l, mn_lm;
+    board_tops(b, &top_cp, &top_op, &mn_l, &mn_lm);
+    uint16_t mn_lms = (uint16_t)(mn_lm & ~(b->cp[0] | b->op[0]));  /* fully empty */
+
+    /* Squares CP currently has its own piece on top of, by size */
+    uint16_t top_cp_by_sz[3];
+    top_cp_by_sz[2] = b->cp[2];
+    top_cp_by_sz[1] = (uint16_t)(b->cp[1] & mn_l);
+    top_cp_by_sz[0] = (uint16_t)(b->cp[0] & mn_lm);
+
+    /* Where can a piece of size sz be placed?  (top of dest must be smaller.) */
+    uint16_t can_place[3];
+    can_place[0] = mn_lms;   /* small  : square must be entirely empty  */
+    can_place[1] = mn_lm;    /* medium : at most a small piece may sit  */
+    can_place[2] = mn_l;     /* large  : at most medium underneath      */
+
+    /* (1) place from hand ---------------------------------------- */
     for (int s = 0; s < N_SIZES; s++) {
-        if (hand_count(b, CELL_CP, s) == 0) continue;
-        for (int sq = 0; sq < N_SQUARES; sq++) {
-            int top_sz, top = top_piece(b, sq, &top_sz);
-            if (top != CELL_EMPTY && top_sz >= s) continue;
+        if (__builtin_popcount(b->cp[s]) >= 2) continue;   /* hand empty */
+        for (uint16_t m = can_place[s]; m; m &= (uint16_t)(m - 1)) {
+            int sq = __builtin_ctz(m);
             board_t nb = *b;
-            nb.cells[s][sq] = CELL_CP;
+            nb.cp[s] |= (uint16_t)(1u << sq);
             int wins = has_three_in_a_row(&nb, CELL_CP);
-            /* OP cannot get a row from a CP placement (CP is on top here). */
-            if (n >= MAX_LEGAL_MOVES) return n;
+            if (n >= MAX_LEGAL_MOVES) goto done;
             moves[n].from = -1;
             moves[n].to   = (int8_t)sq;
             moves[n].size = (int8_t)s;
@@ -36,32 +48,42 @@ int generate_moves(const board_t *b, move_t *moves, int *winning_count)
         }
     }
 
-    /* (2) move a piece on the board */
-    for (int from = 0; from < N_SQUARES; from++) {
-        int top_sz, top = top_piece(b, from, &top_sz);
-        if (top != CELL_CP) continue;
+    /* (2) move a piece on the board ------------------------------ */
+    for (int sz = 0; sz < N_SIZES; sz++) {
+        for (uint16_t srcs = top_cp_by_sz[sz]; srcs; srcs &= (uint16_t)(srcs - 1)) {
+            int from = __builtin_ctz(srcs);
+            uint16_t bit_from = (uint16_t)(1u << from);
 
-        board_t after_pick = *b;
-        after_pick.cells[top_sz][from] = CELL_EMPTY;
-        if (has_three_in_a_row(&after_pick, CELL_OP)) continue; /* losing pickup */
-        if (has_three_in_a_row(&after_pick, CELL_CP)) continue; /* rare pickup-win, skip */
+            board_t after = *b;
+            after.cp[sz] &= (uint16_t)~bit_from;
 
-        for (int to = 0; to < N_SQUARES; to++) {
-            if (to == from) continue;
-            int dsz, dtop = top_piece(&after_pick, to, &dsz);
-            if (dtop != CELL_EMPTY && dsz >= top_sz) continue;
-            board_t nb = after_pick;
-            nb.cells[top_sz][to] = CELL_CP;
-            int wins = has_three_in_a_row(&nb, CELL_CP);
-            if (n >= MAX_LEGAL_MOVES) return n;
-            moves[n].from = (int8_t)from;
-            moves[n].to   = (int8_t)to;
-            moves[n].size = (int8_t)top_sz;
-            n++;
-            if (wins) wc++;
+            uint16_t a_top_cp, a_top_op, a_mn_l, a_mn_lm;
+            board_tops(&after, &a_top_cp, &a_top_op, &a_mn_l, &a_mn_lm);
+            if (line_complete(a_top_cp)) continue;   /* rare pickup-win — skip */
+            if (line_complete(a_top_op)) continue;   /* losing pickup */
+
+            uint16_t a_mn_lms = (uint16_t)(a_mn_lm & ~(after.cp[0] | after.op[0]));
+            uint16_t dst_mask =
+                (sz == 0) ? a_mn_lms :
+                (sz == 1) ? a_mn_lm  : a_mn_l;
+            dst_mask &= (uint16_t)~bit_from;   /* cannot land on the same square */
+
+            for (uint16_t m = dst_mask; m; m &= (uint16_t)(m - 1)) {
+                int to = __builtin_ctz(m);
+                board_t nb = after;
+                nb.cp[sz] |= (uint16_t)(1u << to);
+                int wins = has_three_in_a_row(&nb, CELL_CP);
+                if (n >= MAX_LEGAL_MOVES) goto done;
+                moves[n].from = (int8_t)from;
+                moves[n].to   = (int8_t)to;
+                moves[n].size = (int8_t)sz;
+                n++;
+                if (wins) wc++;
+            }
         }
     }
 
+done:
     if (winning_count) *winning_count = wc;
     return n;
 }
@@ -69,11 +91,11 @@ int generate_moves(const board_t *b, move_t *moves, int *winning_count)
 void apply_move(board_t *b, const move_t *m, int *was_terminal)
 {
     if (m->from < 0) {
-        b->cells[m->size][m->to] = CELL_CP;
+        b->cp[m->size] |= (uint16_t)(1u << m->to);
     } else {
-        b->cells[m->size][m->from] = CELL_EMPTY;
+        b->cp[m->size] &= (uint16_t)~(1u << m->from);
         if (m->to >= 0)
-            b->cells[m->size][m->to] = CELL_CP;
+            b->cp[m->size] |= (uint16_t)(1u << m->to);
     }
     if (was_terminal)
         *was_terminal = has_three_in_a_row(b, CELL_CP) ||
@@ -84,88 +106,107 @@ uint8_t apply_move_next(const board_t *b, const move_t *m, board_t *out_next)
 {
     *out_next = *b;
     if (m->from < 0) {
-        out_next->cells[m->size][m->to] = CELL_CP;
+        out_next->cp[m->size] |= (uint16_t)(1u << m->to);
     } else {
-        out_next->cells[m->size][m->from] = CELL_EMPTY;
+        out_next->cp[m->size] &= (uint16_t)~(1u << m->from);
         if (m->to >= 0)
-            out_next->cells[m->size][m->to] = CELL_CP;
+            out_next->cp[m->size] |= (uint16_t)(1u << m->to);
     }
     int cp_won = has_three_in_a_row(out_next, CELL_CP);
     int op_won = has_three_in_a_row(out_next, CELL_OP);
     board_swap_colors(out_next);
 
     if (cp_won && op_won) return ST_IMPOSSIBLE;
-    if (cp_won) return ST_LOSS(0);   /* next pos: OP-of-next has row */
-    if (op_won) return ST_WIN(0);    /* next pos: CP-of-next has row */
+    if (cp_won) return ST_LOSS(0);
+    if (op_won) return ST_WIN(0);
     return 0;
 }
 
 /*
- * Backward (predecessor) move generation.
+ * Backward (predecessor) move generation (bitboard).
  *
- * Inverse of `generate_moves`.  Given a non-terminal position `b` (in
- * "CP-to-move" perspective), enumerate every PRE such that some legal
- * forward move from PRE produces `b` after the colour-swap.  Each
- * returned PRE is itself in CP-to-move perspective (its CP = the player
- * who just moved to reach `b`).
+ * Mirrors `generate_moves`: we work in Q = colour-swap(b), where the
+ * previous mover (PRE_CP) is now CP.  For every square `s` whose top
+ * piece is a CP-of-Q piece, two predecessor classes are considered:
  *
- * Returns the number of predecessors written into `out_pre` (capped at
- * `cap`).  Validity rules mirror `generate_moves`:
- *   - PRE has no visible three-in-a-row for either side.
- *   - For un-move, the intermediate "piece-just-lifted" state has no
- *     visible row either.
+ *   (a) un-place : that piece returns to PRE_CP's hand.
+ *   (b) un-move  : that piece originally sat on some other square `f`.
  *
- * Note: this routine does NOT enumerate predecessors that would have
- * required a pickup-exposes-row move, since such moves are excluded
- * from `generate_moves` — keeping the two routines symmetric.
+ * Each PRE candidate is rejected unless it is non-terminal AND the
+ * intermediate "piece-just-lifted" state is also non-terminal (mirroring
+ * the pickup constraints in `generate_moves`).
  */
 int generate_predecessors(const board_t *b, board_t *out_pre, int cap)
 {
     int n = 0;
-    /* Q = colour-swap(P).  In Q, the previous mover is CP. */
-    board_t Q = *b;
-    board_swap_colors(&Q);
 
-    /* (Optional fast reject — these can't be normal-move successors.) */
-    if (has_three_in_a_row(&Q, CELL_OP)) return 0;
+    /* Q = colour-swap of P. */
+    board_t Q;
+    for (int s = 0; s < N_SIZES; s++) { Q.cp[s] = b->op[s]; Q.op[s] = b->cp[s]; }
 
-    for (int s = 0; s < N_SQUARES; s++) {
-        int top_sz, top = top_piece(&Q, s, &top_sz);
-        if (top != CELL_CP) continue;
-        int sz = top_sz;
+    /* Fast reject: OP-of-Q line means the move that produced P would
+     * have been one of the excluded "pickup-exposes-row" forward moves. */
+    {
+        uint16_t top_cp_q, top_op_q;
+        board_tops(&Q, &top_cp_q, &top_op_q, NULL, NULL);
+        if (line_complete(top_op_q)) return 0;
+    }
 
-        /* (a) un-place : piece was placed from hand */
-        {
-            board_t pre = Q;
-            pre.cells[sz][s] = CELL_EMPTY;
-            if (!has_three_in_a_row(&pre, CELL_CP) &&
-                !has_three_in_a_row(&pre, CELL_OP)) {
-                if (n < cap) out_pre[n++] = pre;
+    /* Top-of-Q masks for CP-of-Q (PRE_mover) per size */
+    uint16_t mn_l, mn_lm;
+    board_tops(&Q, NULL, NULL, &mn_l, &mn_lm);
+    uint16_t top_cp_by_sz[3];
+    top_cp_by_sz[2] = Q.cp[2];
+    top_cp_by_sz[1] = (uint16_t)(Q.cp[1] & mn_l);
+    top_cp_by_sz[0] = (uint16_t)(Q.cp[0] & mn_lm);
+
+    for (int sz = 0; sz < N_SIZES; sz++) {
+        /* Mask of squares that already contain a piece >=sz in either colour
+         * (a piece of size sz can't be on top there if anything larger sits). */
+        uint16_t blocked_above = 0;
+        for (int t = sz + 1; t < N_SIZES; t++)
+            blocked_above |= (uint16_t)(Q.cp[t] | Q.op[t]);
+
+        for (uint16_t mm = top_cp_by_sz[sz]; mm; mm &= (uint16_t)(mm - 1)) {
+            int s = __builtin_ctz(mm);
+            uint16_t bit_s = (uint16_t)(1u << s);
+
+            /* (a) un-place ---------------------------------------- */
+            {
+                board_t pre = Q;
+                pre.cp[sz] &= (uint16_t)~bit_s;
+                uint16_t tcp, top;
+                board_tops(&pre, &tcp, &top, NULL, NULL);
+                if (!line_complete(tcp) && !line_complete(top)) {
+                    if (n < cap) out_pre[n++] = pre;
+                }
             }
-        }
 
-        /* (b) un-move : piece moved from `f` to `s` */
-        for (int f = 0; f < N_SQUARES; f++) {
-            if (f == s) continue;
-            if (Q.cells[sz][f] != CELL_EMPTY) continue;
-            int ok = 1;
-            for (int t = sz + 1; t < N_SIZES; t++) {
-                if (Q.cells[t][f] != CELL_EMPTY) { ok = 0; break; }
-                if (Q.cells[t][s] != CELL_EMPTY) { ok = 0; break; }
-            }
-            if (!ok) continue;
-
+            /* (b) un-move : piece originated from square `f` ------- */
+            /* I = Q with piece-at-s removed (intermediate "piece in air") */
             board_t I = Q;
-            I.cells[sz][s] = CELL_EMPTY;
-            if (has_three_in_a_row(&I, CELL_CP)) continue;
-            if (has_three_in_a_row(&I, CELL_OP)) continue;
-            board_t pre = I;
-            pre.cells[sz][f] = CELL_CP;
-            if (has_three_in_a_row(&pre, CELL_CP)) continue;
-            if (has_three_in_a_row(&pre, CELL_OP)) continue;
+            I.cp[sz] &= (uint16_t)~bit_s;
+            uint16_t i_top_cp, i_top_op;
+            board_tops(&I, &i_top_cp, &i_top_op, NULL, NULL);
+            int intermediate_bad = line_complete(i_top_cp) || line_complete(i_top_op);
 
-            if (n < cap) out_pre[n++] = pre;
-            else return n;
+            if (intermediate_bad) continue;
+
+            /* Where could `f` have been?  An empty (size-sz) square with no
+             * larger piece sitting on top, and f != s. */
+            uint16_t can_f = (uint16_t)(~(blocked_above | Q.cp[sz] | Q.op[sz]) & 0x1FF);
+            can_f &= (uint16_t)~bit_s;
+
+            for (uint16_t fm = can_f; fm; fm &= (uint16_t)(fm - 1)) {
+                int f = __builtin_ctz(fm);
+                board_t pre = I;
+                pre.cp[sz] |= (uint16_t)(1u << f);
+                uint16_t p_top_cp, p_top_op;
+                board_tops(&pre, &p_top_cp, &p_top_op, NULL, NULL);
+                if (line_complete(p_top_cp) || line_complete(p_top_op)) continue;
+                if (n < cap) out_pre[n++] = pre;
+                else return n;
+            }
         }
     }
     return n;

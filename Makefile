@@ -1,6 +1,6 @@
 CC      ?= cc
-CFLAGS  ?= -O3 -Wall -Wextra -std=c11 -march=native
-LDFLAGS ?=
+CFLAGS  ?= -O3 -Wall -Wextra -std=c11 -march=native -pthread
+LDFLAGS ?= -pthread
 
 OBJ_COMMON = position.o moves.o
 

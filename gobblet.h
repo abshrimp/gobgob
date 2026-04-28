@@ -59,10 +59,49 @@ typedef uint16_t cfg_id_t;
 
 #define MAX_LEGAL_MOVES 64
 
+/*
+ * Bitboard representation: one 9-bit mask per (player, size).
+ * Bit `sq` is set in cp[sz] iff the current player owns a size-`sz` piece
+ * sitting at square `sq` (and likewise for op[sz]).  cp[sz] & op[sz] is
+ * always zero (a square can hold at most one piece per size).
+ */
 typedef struct {
-    /* cells[size][square]: CELL_EMPTY / CELL_CP / CELL_OP */
-    uint8_t cells[N_SIZES][N_SQUARES];
+    uint16_t cp[N_SIZES];
+    uint16_t op[N_SIZES];
 } board_t;
+
+/* 9-bit line masks (3 rows, 3 columns, 2 diagonals). */
+static const uint16_t LINE_MASKS[8] = {
+    0x007, 0x038, 0x1C0,   /* rows    */
+    0x049, 0x092, 0x124,   /* columns */
+    0x111, 0x054           /* diags   */
+};
+
+static inline int line_complete(uint16_t mask)
+{
+    for (int i = 0; i < 8; i++)
+        if ((mask & LINE_MASKS[i]) == LINE_MASKS[i]) return 1;
+    return 0;
+}
+
+/*
+ * Compute "top-piece-is-CP" / "top-piece-is-OP" masks plus the
+ * "no large piece here" and "no large or medium piece here" masks in one
+ * pass.  Pass NULL for any output you don't need.
+ */
+static inline void board_tops(const board_t *b,
+                              uint16_t *top_cp, uint16_t *top_op,
+                              uint16_t *no_l,   uint16_t *no_lm)
+{
+    uint16_t all_l = b->cp[2] | b->op[2];
+    uint16_t all_m = b->cp[1] | b->op[1];
+    uint16_t mn_l  = (uint16_t)(~all_l & 0x1FF);
+    uint16_t mn_lm = (uint16_t)(mn_l & ~all_m);
+    if (top_cp) *top_cp = (uint16_t)(b->cp[2] | (b->cp[1] & mn_l) | (b->cp[0] & mn_lm));
+    if (top_op) *top_op = (uint16_t)(b->op[2] | (b->op[1] & mn_l) | (b->op[0] & mn_lm));
+    if (no_l)   *no_l   = mn_l;
+    if (no_lm)  *no_lm  = mn_lm;
+}
 
 typedef struct {
     int8_t  from;   /* -1 = from hand           */

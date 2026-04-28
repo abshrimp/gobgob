@@ -38,7 +38,7 @@ static void test_config_roundtrip(void)
 static void test_board_roundtrip(void)
 {
     /* Empty board */
-    board_t b = {{{0}}};
+    board_t b = { .cp = {0}, .op = {0} };
     pos_id_t id = board_to_id(&b);
     ASSERT(id == 0, "empty board id=%llu", (unsigned long long)id);
     board_t b2;
@@ -53,8 +53,11 @@ static void test_board_roundtrip(void)
         for (int s = 0; s < N_SIZES; s++) {
             for (int sq = 0; sq < N_SQUARES; sq++) {
                 int v = rand() % 4;
-                if (v == 1 && cp_count[s] < 2) { r.cells[s][sq] = CELL_CP; cp_count[s]++; }
-                else if (v == 2 && op_count[s] < 2) { r.cells[s][sq] = CELL_OP; op_count[s]++; }
+                uint16_t bit = (uint16_t)(1u << sq);
+                /* Don't double-occupy a (size,square) slot */
+                if ((r.cp[s] | r.op[s]) & bit) continue;
+                if (v == 1 && cp_count[s] < 2) { r.cp[s] |= bit; cp_count[s]++; }
+                else if (v == 2 && op_count[s] < 2) { r.op[s] |= bit; op_count[s]++; }
             }
         }
         pos_id_t pid = board_to_id(&r);
@@ -78,37 +81,30 @@ static void test_initial_moves(void)
 static void test_three_in_a_row(void)
 {
     board_t b; memset(&b, 0, sizeof b);
-    /* Top row of small-CP pieces */
-    b.cells[0][0] = CELL_CP;
-    b.cells[0][1] = CELL_CP;
-    b.cells[0][2] = CELL_CP;
-    /* Wait: only 2 small CP pieces are allowed, and we just placed three.
-       This is for the row-detection test only — board may be illegal. */
+    /* Top row of small-CP pieces (legal piece counts ignored — only
+     * checking the row-detection logic). */
+    b.cp[0] = (uint16_t)((1u<<0) | (1u<<1) | (1u<<2));
     ASSERT(has_three_in_a_row(&b, CELL_CP), "row detection");
 
-    /* Now overlay an OP medium on square 1 — should hide the CP small. */
-    b.cells[1][1] = CELL_OP;
+    /* Overlay an OP medium on sq 1 — should hide the CP small. */
+    b.op[1] = (uint16_t)(1u << 1);
     ASSERT(!has_three_in_a_row(&b, CELL_CP), "row hidden by larger OP");
 }
 
 static void test_predecessor_basic(void)
 {
-    /* Take an empty board, play "place small at sq 4" forward, then
-     * confirm that the empty board appears as a predecessor of the
-     * resulting (post-swap) position. */
     board_t a; memset(&a, 0, sizeof a);
     board_t after;
     move_t m = { .from = -1, .to = 4, .size = 0 };
-    apply_move_next(&a, &m, &after);  /* applies + colour-swaps */
+    apply_move_next(&a, &m, &after);
 
     board_t pre[256];
     int n = generate_predecessors(&after, pre, 256);
     int found_empty = 0;
     for (int i = 0; i < n; i++) {
         int empty = 1;
-        for (int s = 0; s < N_SIZES && empty; s++)
-            for (int sq = 0; sq < N_SQUARES && empty; sq++)
-                if (pre[i].cells[s][sq] != CELL_EMPTY) empty = 0;
+        for (int s = 0; s < N_SIZES; s++)
+            if (pre[i].cp[s] | pre[i].op[s]) { empty = 0; break; }
         if (empty) { found_empty = 1; break; }
     }
     ASSERT(found_empty, "empty board appears as predecessor (n=%d)", n);
